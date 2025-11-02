@@ -1,0 +1,14 @@
+{
+  "lockfile_version": "1",
+  "packages": {
+    "github:NixOS/nixpkgs/nixpkgs-unstable": {
+      "last_modified": "2025-10-31T03:13:32Z",
+      "resolved": "github:NixOS/nixpkgs/a7fc11be66bdfb5cdde611ee5ce381c183da8386?lastModified=1761880412"
+    },
+    "rustup": {
+      "plugin_version": "0.0.1",
+      "resolved": "github:NixOS/nixpkgs/a7fc11be66bdfb5cdde611ee5ce381c183da8386#rustup",
+      "source": "nixpkg"
+    }
+  }
+}
