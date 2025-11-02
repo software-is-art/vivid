@@ -21,3 +21,6 @@
 - Implemented `stabilizes` monitor with windowed plateau detection and integration tests for delayed admits.
 - Added `rateLimit` monitor enforcing spacing between events plus interpreter regression case.
 - Added guard composition builtins with keyed `unique` support and regression tests for combined monitors.
+- Added `noGaps` monitor builtin and regression ensuring sparse streams trigger policy drops.
+- Enabled labeled monitor arguments (`by:`, `within:`, `per:`) and updated interpreter semantics/tests to keep guard code terse.
+- Implemented count-based `window(last: N, of: stream)` builtin with sliding list output and coverage in interpreter tests.

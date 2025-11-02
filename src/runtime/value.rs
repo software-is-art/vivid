@@ -76,9 +76,15 @@ pub struct FunctionValue {
 }
 
 #[derive(Clone)]
+pub struct CallArg {
+    pub label: Option<String>,
+    pub value: RuntimeValue,
+}
+
+#[derive(Clone)]
 pub struct BuiltinFunction {
     pub name: &'static str,
-    pub handler: Rc<dyn Fn(&[RuntimeValue]) -> Result<RuntimeValue, Diagnostic>>, // expects already-evaluated args
+    pub handler: Rc<dyn Fn(&[CallArg]) -> Result<RuntimeValue, Diagnostic>>, // expects already-evaluated args
     pub min_arity: usize,
     pub max_arity: Option<usize>,
 }
@@ -91,7 +97,7 @@ impl BuiltinFunction {
         handler: F,
     ) -> Self
     where
-        F: Fn(&[RuntimeValue]) -> Result<RuntimeValue, Diagnostic> + 'static,
+        F: Fn(&[CallArg]) -> Result<RuntimeValue, Diagnostic> + 'static,
     {
         Self {
             name,

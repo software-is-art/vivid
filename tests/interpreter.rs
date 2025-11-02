@@ -456,7 +456,7 @@ fn stabilizes_guard_waits_for_plateau() {
 fn rate_limit_guard_throttles_events() {
     let source = r#"
         value Rate : Bool {
-            always rateLimit(it, 2)
+            always rateLimit(it, per: 2)
             policy invalid = drop
         }
 
@@ -503,7 +503,7 @@ fn guard_composition_and_keyed_unique() {
         struct Event { user: String, score: Int }
 
         value Combined : Event {
-            always unique(it.score, it.user) && monotone(it.score)
+            always unique(it.score, by: it.user) && monotone(it.score)
             policy invalid = drop
         }
 
@@ -544,6 +544,76 @@ fn guard_composition_and_keyed_unique() {
             ScalarValue::Undefined,
             user_record("bob", 2),
             ScalarValue::Undefined,
+        ],
+    );
+}
+
+#[test]
+fn no_gaps_guard_requires_defined_samples() {
+    let source = r#"
+        value Strict : Int {
+            always noGaps(it)
+            policy invalid = drop
+        }
+
+        let base = 1 fby 2;
+        let gate = true fby false;
+        let sparse = base when gate;
+        let guard = Strict.guard(sparse);
+        let repaired = Strict.use(sparse);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let guard = interpreter
+        .get_global("guard")
+        .and_then(|value| value.as_stream())
+        .expect("guard stream");
+    assert_stream_eq(
+        &guard,
+        &[
+            ScalarValue::Bool(true),
+            ScalarValue::Bool(false),
+            ScalarValue::Bool(false),
+        ],
+    );
+
+    let repaired = interpreter
+        .get_global("repaired")
+        .and_then(|value| value.as_stream())
+        .expect("repaired stream");
+    assert_stream_eq(
+        &repaired,
+        &[
+            ScalarValue::Int(1),
+            ScalarValue::Undefined,
+            ScalarValue::Undefined,
+        ],
+    );
+}
+
+#[test]
+fn window_last_emits_sliding_lists() {
+    let source = r#"
+        let data = 1 fby (2 fby 3);
+        let wins = window(last: 2, of: data);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let wins = interpreter
+        .get_global("wins")
+        .and_then(|value| value.as_stream())
+        .expect("wins stream");
+    assert_stream_eq(
+        &wins,
+        &[
+            ScalarValue::List(vec![ScalarValue::Int(1)]),
+            ScalarValue::List(vec![ScalarValue::Int(1), ScalarValue::Int(2)]),
+            ScalarValue::List(vec![ScalarValue::Int(2), ScalarValue::Int(3)]),
+            ScalarValue::List(vec![ScalarValue::Int(3), ScalarValue::Int(3)]),
         ],
     );
 }

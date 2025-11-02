@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use crate::ast::*;
@@ -7,7 +7,7 @@ use crate::diagnostics::{Diagnostic, DiagnosticKind};
 use super::env::Environment;
 use super::stream::Stream;
 use super::value::{
-    BuiltinFunction, FunctionValue, RuntimeValue, ScalarValue, ValueTypeMethod,
+    BuiltinFunction, CallArg, FunctionValue, RuntimeValue, ScalarValue, ValueTypeMethod,
     ValueTypeMethodRuntime, ValueTypeRuntime,
 };
 
@@ -26,27 +26,31 @@ impl Interpreter {
 
     fn install_builtins(&mut self) {
         self.register_builtin(BuiltinFunction::new("next", 1, Some(1), |args| {
-            let stream = expect_stream(&args[0], "next")?;
+            ensure_no_labels("next", args)?;
+            let stream = expect_stream(&args[0].value, "next")?;
             Ok(RuntimeValue::Stream(Stream::new(move |tick| {
                 stream.value_at(tick + 1)
             })))
         }));
 
         self.register_builtin(BuiltinFunction::new("first", 1, Some(1), |args| {
-            let stream = expect_stream(&args[0], "first")?;
+            ensure_no_labels("first", args)?;
+            let stream = expect_stream(&args[0].value, "first")?;
             let first = stream.value_at(0);
             Ok(RuntimeValue::Stream(Stream::constant(first)))
         }));
 
         self.register_builtin(BuiltinFunction::new("rest", 1, Some(1), |args| {
-            let stream = expect_stream(&args[0], "rest")?;
+            ensure_no_labels("rest", args)?;
+            let stream = expect_stream(&args[0].value, "rest")?;
             Ok(RuntimeValue::Stream(Stream::new(move |tick| {
                 stream.value_at(tick + 1)
             })))
         }));
 
         self.register_builtin(BuiltinFunction::new("defined", 1, Some(1), |args| {
-            let stream = expect_stream(&args[0], "defined")?;
+            ensure_no_labels("defined", args)?;
+            let stream = expect_stream(&args[0].value, "defined")?;
             Ok(RuntimeValue::Stream(Stream::new(move |tick| {
                 let value = stream.value_at(tick);
                 ScalarValue::Bool(value.is_defined())
@@ -54,8 +58,9 @@ impl Interpreter {
         }));
 
         self.register_builtin(BuiltinFunction::new("when", 2, Some(2), |args| {
-            let value_stream = expect_stream(&args[0], "when value")?;
-            let guard_stream = expect_stream(&args[1], "when guard")?;
+            ensure_no_labels("when", args)?;
+            let value_stream = expect_stream(&args[0].value, "when value")?;
+            let guard_stream = expect_stream(&args[1].value, "when guard")?;
             Ok(RuntimeValue::Stream(Stream::new(move |tick| {
                 let guard = guard_stream.value_at(tick);
                 if guard.as_bool().unwrap_or(false) {
@@ -67,8 +72,9 @@ impl Interpreter {
         }));
 
         self.register_builtin(BuiltinFunction::new("upon", 2, Some(2), |args| {
-            let value_stream = expect_stream(&args[0], "upon value")?;
-            let guard_stream = expect_stream(&args[1], "upon guard")?;
+            ensure_no_labels("upon", args)?;
+            let value_stream = expect_stream(&args[0].value, "upon value")?;
+            let guard_stream = expect_stream(&args[1].value, "upon guard")?;
             Ok(RuntimeValue::Stream(make_upon_stream(
                 value_stream,
                 guard_stream,
@@ -76,58 +82,328 @@ impl Interpreter {
         }));
 
         self.register_builtin(BuiltinFunction::new("hold", 1, Some(1), |args| {
-            let source_stream = expect_stream(&args[0], "hold source")?;
+            ensure_no_labels("hold", args)?;
+            let source_stream = expect_stream(&args[0].value, "hold source")?;
             Ok(RuntimeValue::Stream(make_hold_stream(source_stream)))
         }));
 
         self.register_builtin(BuiltinFunction::new("unique", 1, Some(2), |args| {
-            let value_stream = expect_stream(&args[0], "unique value")?;
-            let key_stream = if args.len() == 2 {
-                Some(expect_stream(&args[1], "unique key")?)
-            } else {
-                None
-            };
-            Ok(RuntimeValue::Stream(make_unique_guard(value_stream, key_stream)))
+            let mut value_stream = None;
+            let mut key_stream = None;
+
+            for arg in args.iter() {
+                match arg.label.as_deref() {
+                    Some("value") => {
+                        if value_stream.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate 'value' argument to unique",
+                            ));
+                        }
+                        value_stream = Some(expect_stream(&arg.value, "unique value")?);
+                    }
+                    Some("by") | Some("key") => {
+                        if key_stream.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate key argument to unique",
+                            ));
+                        }
+                        key_stream = Some(expect_stream(&arg.value, "unique key")?);
+                    }
+                    Some(label) => {
+                        return Err(Diagnostic::new(
+                            DiagnosticKind::Eval,
+                            format!("unknown label '{}' for unique", label),
+                        ));
+                    }
+                    None => {
+                        if value_stream.is_none() {
+                            value_stream = Some(expect_stream(&arg.value, "unique value")?);
+                        } else if key_stream.is_none() {
+                            key_stream = Some(expect_stream(&arg.value, "unique key")?);
+                        } else {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "unique accepts at most two arguments",
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let value_stream = value_stream.ok_or_else(|| {
+                Diagnostic::new(
+                    DiagnosticKind::Eval,
+                    "unique requires a value stream argument",
+                )
+            })?;
+
+            Ok(RuntimeValue::Stream(make_unique_guard(
+                value_stream,
+                key_stream,
+            )))
         }));
 
         self.register_builtin(BuiltinFunction::new("monotone", 1, Some(2), |args| {
-            let source_stream = expect_stream(&args[0], "monotone value")?;
-            let direction = if args.len() == 2 {
-                let direction_stream = expect_stream(&args[1], "monotone direction")?;
-                let directive = direction_stream.value_at(0);
-                parse_monotone_direction(&directive)?
-            } else {
-                MonotoneDirection::NonDecreasing
-            };
-            Ok(RuntimeValue::Stream(make_monotone_guard(source_stream, direction)))
+            let mut source_stream = None;
+            let mut direction = None;
+
+            for arg in args.iter() {
+                match arg.label.as_deref() {
+                    Some("value") => {
+                        if source_stream.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate 'value' argument to monotone",
+                            ));
+                        }
+                        source_stream = Some(expect_stream(&arg.value, "monotone value")?);
+                    }
+                    Some("direction") | Some("by") => {
+                        if direction.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate direction argument to monotone",
+                            ));
+                        }
+                        let stream = expect_stream(&arg.value, "monotone direction")?;
+                        direction = Some(parse_monotone_direction(&stream.value_at(0))?);
+                    }
+                    Some(label) => {
+                        return Err(Diagnostic::new(
+                            DiagnosticKind::Eval,
+                            format!("unknown label '{}' for monotone", label),
+                        ));
+                    }
+                    None => {
+                        if source_stream.is_none() {
+                            source_stream = Some(expect_stream(&arg.value, "monotone value")?);
+                        } else if direction.is_none() {
+                            let stream = expect_stream(&arg.value, "monotone direction")?;
+                            direction = Some(parse_monotone_direction(&stream.value_at(0))?);
+                        } else {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "monotone accepts at most two arguments",
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let source_stream = source_stream.ok_or_else(|| {
+                Diagnostic::new(DiagnosticKind::Eval, "monotone requires a value stream")
+            })?;
+
+            let direction = direction.unwrap_or(MonotoneDirection::NonDecreasing);
+            Ok(RuntimeValue::Stream(make_monotone_guard(
+                source_stream,
+                direction,
+            )))
         }));
 
         self.register_builtin(BuiltinFunction::new("stabilizes", 2, Some(2), |args| {
-            let source_stream = expect_stream(&args[0], "stabilizes value")?;
-            let window_stream = expect_stream(&args[1], "stabilizes window")?;
-            let raw = window_stream.value_at(0);
-            let window = parse_stabilizes_window(&raw)?;
-            Ok(RuntimeValue::Stream(make_stabilizes_guard(source_stream, window)))
+            let mut source_stream = None;
+            let mut window_value = None;
+
+            for arg in args {
+                match arg.label.as_deref() {
+                    Some("value") => {
+                        if source_stream.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate 'value' argument to stabilizes",
+                            ));
+                        }
+                        source_stream = Some(expect_stream(&arg.value, "stabilizes value")?);
+                    }
+                    Some("within") | Some("window") => {
+                        if window_value.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate window argument to stabilizes",
+                            ));
+                        }
+                        let stream = expect_stream(&arg.value, "stabilizes window")?;
+                        window_value = Some(stream.value_at(0));
+                    }
+                    Some(label) => {
+                        return Err(Diagnostic::new(
+                            DiagnosticKind::Eval,
+                            format!("unknown label '{}' for stabilizes", label),
+                        ));
+                    }
+                    None => {
+                        if source_stream.is_none() {
+                            source_stream = Some(expect_stream(&arg.value, "stabilizes value")?);
+                        } else if window_value.is_none() {
+                            let stream = expect_stream(&arg.value, "stabilizes window")?;
+                            window_value = Some(stream.value_at(0));
+                        } else {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "stabilizes expects exactly two arguments",
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let source_stream = source_stream.ok_or_else(|| {
+                Diagnostic::new(DiagnosticKind::Eval, "stabilizes requires a value stream")
+            })?;
+            let window_raw = window_value.ok_or_else(|| {
+                Diagnostic::new(
+                    DiagnosticKind::Eval,
+                    "stabilizes requires a window argument",
+                )
+            })?;
+            let window = parse_stabilizes_window(&window_raw)?;
+            Ok(RuntimeValue::Stream(make_stabilizes_guard(
+                source_stream,
+                window,
+            )))
         }));
 
         self.register_builtin(BuiltinFunction::new("rateLimit", 2, Some(2), |args| {
-            let event_stream = expect_stream(&args[0], "rateLimit events")?;
-            let interval_stream = expect_stream(&args[1], "rateLimit interval")?;
-            let raw = interval_stream.value_at(0);
-            let interval = parse_rate_limit_interval(&raw)?;
-            Ok(RuntimeValue::Stream(make_rate_limit_guard(event_stream, interval)))
+            let mut event_stream = None;
+            let mut interval_value = None;
+
+            for arg in args {
+                match arg.label.as_deref() {
+                    Some("events") => {
+                        if event_stream.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate 'events' argument to rateLimit",
+                            ));
+                        }
+                        event_stream = Some(expect_stream(&arg.value, "rateLimit events")?);
+                    }
+                    Some("per") | Some("interval") => {
+                        if interval_value.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate interval argument to rateLimit",
+                            ));
+                        }
+                        let stream = expect_stream(&arg.value, "rateLimit interval")?;
+                        interval_value = Some(stream.value_at(0));
+                    }
+                    Some(label) => {
+                        return Err(Diagnostic::new(
+                            DiagnosticKind::Eval,
+                            format!("unknown label '{}' for rateLimit", label),
+                        ));
+                    }
+                    None => {
+                        if event_stream.is_none() {
+                            event_stream = Some(expect_stream(&arg.value, "rateLimit events")?);
+                        } else if interval_value.is_none() {
+                            let stream = expect_stream(&arg.value, "rateLimit interval")?;
+                            interval_value = Some(stream.value_at(0));
+                        } else {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "rateLimit expects exactly two arguments",
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let event_stream = event_stream.ok_or_else(|| {
+                Diagnostic::new(DiagnosticKind::Eval, "rateLimit requires an event stream")
+            })?;
+            let interval_raw = interval_value.ok_or_else(|| {
+                Diagnostic::new(
+                    DiagnosticKind::Eval,
+                    "rateLimit requires an interval argument",
+                )
+            })?;
+            let interval = parse_rate_limit_interval(&interval_raw)?;
+            Ok(RuntimeValue::Stream(make_rate_limit_guard(
+                event_stream,
+                interval,
+            )))
+        }));
+
+        self.register_builtin(BuiltinFunction::new("window", 2, Some(2), |args| {
+            let mut value_stream = None;
+            let mut size_value = None;
+
+            for arg in args {
+                match arg.label.as_deref() {
+                    Some("of") | Some("value") => {
+                        if value_stream.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate 'of' argument to window",
+                            ));
+                        }
+                        value_stream = Some(expect_stream(&arg.value, "window value")?);
+                    }
+                    Some("last") | Some("size") => {
+                        if size_value.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate window size argument",
+                            ));
+                        }
+                        let stream = expect_stream(&arg.value, "window size")?;
+                        size_value = Some(stream.value_at(0));
+                    }
+                    Some(label) => {
+                        return Err(Diagnostic::new(
+                            DiagnosticKind::Eval,
+                            format!("unknown label '{}' for window", label),
+                        ));
+                    }
+                    None => {
+                        if size_value.is_none() {
+                            let stream = expect_stream(&arg.value, "window size")?;
+                            size_value = Some(stream.value_at(0));
+                        } else if value_stream.is_none() {
+                            value_stream = Some(expect_stream(&arg.value, "window value")?);
+                        } else {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "window expects exactly two arguments",
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let value_stream = value_stream.ok_or_else(|| {
+                Diagnostic::new(DiagnosticKind::Eval, "window requires an input stream")
+            })?;
+            let size_raw = size_value.ok_or_else(|| {
+                Diagnostic::new(DiagnosticKind::Eval, "window requires a size argument")
+            })?;
+            let size = parse_window_size(&size_raw)?;
+            Ok(RuntimeValue::Stream(make_window_stream(value_stream, size)))
         }));
 
         self.register_builtin(BuiltinFunction::new("guard_and", 2, Some(2), |args| {
-            let left = expect_stream(&args[0], "guard_and left")?;
-            let right = expect_stream(&args[1], "guard_and right")?;
+            ensure_no_labels("guard_and", args)?;
+            let left = expect_stream(&args[0].value, "guard_and left")?;
+            let right = expect_stream(&args[1].value, "guard_and right")?;
             Ok(RuntimeValue::Stream(make_guard_and(left, right)))
         }));
 
         self.register_builtin(BuiltinFunction::new("guard_or", 2, Some(2), |args| {
-            let left = expect_stream(&args[0], "guard_or left")?;
-            let right = expect_stream(&args[1], "guard_or right")?;
+            ensure_no_labels("guard_or", args)?;
+            let left = expect_stream(&args[0].value, "guard_or left")?;
+            let right = expect_stream(&args[1].value, "guard_or right")?;
             Ok(RuntimeValue::Stream(make_guard_or(left, right)))
+        }));
+
+        self.register_builtin(BuiltinFunction::new("noGaps", 1, Some(1), |args| {
+            ensure_no_labels("noGaps", args)?;
+            let stream = expect_stream(&args[0].value, "noGaps value")?;
+            Ok(RuntimeValue::Stream(make_no_gaps_guard(stream)))
         }));
     }
 
@@ -284,7 +560,10 @@ impl Interpreter {
                 let mut arg_values = Vec::new();
                 for argument in arguments {
                     let value = self.evaluate_expr(&argument.expr, env)?;
-                    arg_values.push(value);
+                    arg_values.push(CallArg {
+                        label: argument.label.as_ref().map(|id| id.name.clone()),
+                        value,
+                    });
                 }
                 self.apply_callable(callee_value, arg_values)
             }
@@ -624,7 +903,7 @@ impl Interpreter {
     fn apply_callable(
         &self,
         callee: RuntimeValue,
-        args: Vec<RuntimeValue>,
+        args: Vec<CallArg>,
     ) -> Result<RuntimeValue, Vec<Diagnostic>> {
         if let Some(function) = callee.as_function() {
             if function.params.len() != args.len() {
@@ -638,9 +917,18 @@ impl Interpreter {
                     ),
                 )]);
             }
+            if args.iter().any(|arg| arg.label.is_some()) {
+                return Err(vec![Diagnostic::new(
+                    DiagnosticKind::Eval,
+                    format!(
+                        "function '{}' does not accept labeled arguments",
+                        function.name
+                    ),
+                )]);
+            }
             let mut env_map = function.env.clone();
-            for (param, value) in function.params.iter().zip(args.into_iter()) {
-                env_map = env_map.extend(param.clone(), value);
+            for (param, arg) in function.params.iter().zip(args.into_iter()) {
+                env_map = env_map.extend(param.clone(), arg.value);
             }
             self.evaluate_expr(&function.body, &env_map)
         } else if let Some(builtin) = callee.as_builtin() {
@@ -677,7 +965,7 @@ impl Interpreter {
     fn invoke_value_type_method(
         &self,
         method: ValueTypeMethodRuntime,
-        args: Vec<RuntimeValue>,
+        args: Vec<CallArg>,
     ) -> Result<RuntimeValue, Vec<Diagnostic>> {
         if args.len() != 1 {
             return Err(vec![Diagnostic::new(
@@ -689,7 +977,17 @@ impl Interpreter {
             )]);
         }
 
-        let input_stream = expect_stream_vec(&args[0], "value method argument")?;
+        if let Some(label) = &args[0].label {
+            return Err(vec![Diagnostic::new(
+                DiagnosticKind::Eval,
+                format!(
+                    "value '{}' method does not accept labeled argument '{}'",
+                    method.value_type.decl.name.name, label
+                ),
+            )]);
+        }
+
+        let input_stream = expect_stream_vec(&args[0].value, "value method argument")?;
         let eval = self.evaluate_value_type(&method.value_type, input_stream.clone())?;
         let ValueTypeEvaluation {
             normalized,
@@ -1089,15 +1387,13 @@ fn parse_monotone_direction(value: &ScalarValue) -> Result<MonotoneDirection, Di
     let directive = match value {
         ScalarValue::String(text) => text.trim().to_ascii_lowercase(),
         other => {
-            return Err(
-                Diagnostic::new(
-                    DiagnosticKind::Eval,
-                    format!(
-                        "monotone direction expects string descriptor, found {}",
-                        other.to_string_lossy()
-                    ),
-                )
-            );
+            return Err(Diagnostic::new(
+                DiagnosticKind::Eval,
+                format!(
+                    "monotone direction expects string descriptor, found {}",
+                    other.to_string_lossy()
+                ),
+            ));
         }
     };
 
@@ -1137,12 +1433,8 @@ fn make_monotone_guard(source_stream: Stream, direction: MonotoneDirection) -> S
             let result = match last_ref.as_ref() {
                 None => true,
                 Some(prev) => match direction {
-                    MonotoneDirection::NonDecreasing => {
-                        compare(prev, &value, |a, b| a <= b)
-                    }
-                    MonotoneDirection::NonIncreasing => {
-                        compare(prev, &value, |a, b| a >= b)
-                    }
+                    MonotoneDirection::NonDecreasing => compare(prev, &value, |a, b| a <= b),
+                    MonotoneDirection::NonIncreasing => compare(prev, &value, |a, b| a >= b),
                 },
             };
             *last_ref = Some(value.clone());
@@ -1257,5 +1549,63 @@ fn make_guard_or(left: Stream, right: Stream) -> Stream {
         let lhs = left.value_at(tick).as_bool().unwrap_or(false);
         let rhs = right.value_at(tick).as_bool().unwrap_or(false);
         ScalarValue::Bool(lhs || rhs)
+    })
+}
+
+fn make_no_gaps_guard(stream: Stream) -> Stream {
+    Stream::new(move |tick| ScalarValue::Bool(stream.value_at(tick).is_defined()))
+}
+
+fn ensure_no_labels(name: &str, args: &[CallArg]) -> Result<(), Diagnostic> {
+    for arg in args {
+        if let Some(label) = &arg.label {
+            return Err(Diagnostic::new(
+                DiagnosticKind::Eval,
+                format!(
+                    "builtin '{}' does not accept labeled argument '{}'",
+                    name, label
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_window_size(value: &ScalarValue) -> Result<usize, Diagnostic> {
+    match value.as_int() {
+        Some(n) if n >= 0 => Ok(n as usize),
+        Some(_) => Err(Diagnostic::new(
+            DiagnosticKind::Eval,
+            "window size must be a non-negative integer",
+        )),
+        None => Err(Diagnostic::new(
+            DiagnosticKind::Eval,
+            format!(
+                "window size expects integer length, found {}",
+                value.to_string_lossy()
+            ),
+        )),
+    }
+}
+
+fn make_window_stream(value_stream: Stream, size: usize) -> Stream {
+    use std::cell::RefCell;
+
+    let buffer = RefCell::new(VecDeque::<ScalarValue>::new());
+    Stream::new(move |tick| {
+        let value = value_stream.value_at(tick);
+        {
+            let mut deque = buffer.borrow_mut();
+            if size == 0 {
+                deque.clear();
+            } else {
+                if deque.len() == size {
+                    deque.pop_front();
+                }
+                deque.push_back(value.clone());
+            }
+        }
+        let snapshot = buffer.borrow().iter().cloned().collect::<Vec<_>>();
+        ScalarValue::List(snapshot)
     })
 }
