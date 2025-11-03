@@ -71,6 +71,7 @@ I include specific deliverables, suggested internal APIs, test plans, and refere
   * `stabilizes(x, within N)`,
   * `rateLimit(x, per Δt)` (requires a time stream),
   * `noGaps(x) ≡ □ defined(x)`.
+  * All monitors accept labeled arguments for readability: e.g. `unique(value: x, by: key)`, `monotone(it, direction: ">=")`, `stabilizes(value: it, within: 3)`, `rateLimit(events: flag, per: 5)`. Positional calls remain valid, but labels are preferred in examples.
 * Compose guards (`and`, `or`, `by key`). Output a boolean stream for `policy`.
   *Grounding:* online RV for LTL/TLTL (three‑valued semantics, causality, finite memory where possible). ([isp.uni-luebeck.de][7])
 
@@ -81,7 +82,7 @@ I include specific deliverables, suggested internal APIs, test plans, and refere
 
 **WP7 — Windows & aggregations**
 
-* `window(last: N, of x)` (count‑based) and `window(last: Δt, of x)` (time‑based).
+* `window(last: N, of x)` (count‑based) and `window(last: Δt, of x)` (time‑based). The interpreter exposes the count-based primitive today; it returns `S<List<Value>>`, i.e. each tick sees the trailing window as a list. Aggregators (`sum`, `avg`, `countDistinct`) consume that list stream in later milestones.
 * `map(countDistinct)`, `sum`, `avg`, custom folds via `foldWindow(init, step, out)`.
 * Semantics line up with CQL (streams + relations + windows). ([infolab.stanford.edu][4])
 
@@ -304,4 +305,3 @@ If you’d like, I can turn WP1 into a short “spec.md” (surface grammar + ty
 [9]: https://cs.indiana.edu/~dyb/pubs/nano-jfp.pdf?utm_source=chatgpt.com "A Nanopass Framework for Compiler Education"
 [10]: https://users.soe.ucsc.edu/~cormac/papers/pldi93.pdf?utm_source=chatgpt.com "The Essence of Compiling with Continuations Abstract 1 ..."
 [11]: https://www.researchgate.net/publication/222407600_Type-based_Initialization_Analysis_of_a_Synchronous_Data-flow_Language?utm_source=chatgpt.com "Type-based Initialization Analysis of a Synchronous Data ..."
-
