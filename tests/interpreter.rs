@@ -617,3 +617,221 @@ fn window_last_emits_sliding_lists() {
         ],
     );
 }
+
+#[test]
+fn sum_over_window_accumulates_values() {
+    let source = r#"
+        let data = 1 fby (2 fby (3 fby 4));
+        let wins = window(last: 3, of: data);
+        let totals = sum(wins);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let totals = interpreter
+        .get_global("totals")
+        .and_then(|value| value.as_stream())
+        .expect("totals stream");
+    assert_stream_eq(
+        &totals,
+        &[
+            ScalarValue::Int(1),
+            ScalarValue::Int(3),
+            ScalarValue::Int(6),
+            ScalarValue::Int(9),
+            ScalarValue::Int(11),
+        ],
+    );
+}
+
+#[test]
+fn avg_over_window_returns_mean() {
+    let source = r#"
+        let data = 1 fby (2 fby (3 fby 4));
+        let wins = window(last: 3, of: data);
+        let averages = avg(wins);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let averages = interpreter
+        .get_global("averages")
+        .and_then(|value| value.as_stream())
+        .expect("averages stream");
+    assert_stream_eq(
+        &averages,
+        &[
+            ScalarValue::Float(1.0),
+            ScalarValue::Float(1.5),
+            ScalarValue::Float(2.0),
+            ScalarValue::Float(3.0),
+            ScalarValue::Float(11.0 / 3.0),
+        ],
+    );
+}
+
+#[test]
+fn count_distinct_over_window_tracks_uniques() {
+    let source = r#"
+        let data = 1 fby (1 fby (2 fby 3));
+        let wins = window(last: 3, of: data);
+        let uniques = countDistinct(wins);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let uniques = interpreter
+        .get_global("uniques")
+        .and_then(|value| value.as_stream())
+        .expect("uniques stream");
+    assert_stream_eq(
+        &uniques,
+        &[
+            ScalarValue::Int(1),
+            ScalarValue::Int(1),
+            ScalarValue::Int(2),
+            ScalarValue::Int(3),
+            ScalarValue::Int(2),
+        ],
+    );
+}
+
+#[test]
+fn tick_every_pulses_on_interval() {
+    let source = r#"
+        let clock = tickEvery(3);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let clock = interpreter
+        .get_global("clock")
+        .and_then(|value| value.as_stream())
+        .expect("clock stream");
+    assert_stream_eq(
+        &clock,
+        &[
+            ScalarValue::Bool(true),
+            ScalarValue::Bool(false),
+            ScalarValue::Bool(false),
+            ScalarValue::Bool(true),
+            ScalarValue::Bool(false),
+            ScalarValue::Bool(false),
+            ScalarValue::Bool(true),
+        ],
+    );
+}
+
+#[test]
+fn window_with_time_argument_trims_by_timestamp() {
+    let source = r#"
+        let data = 1 fby (2 fby (3 fby (4 fby 5)));
+        let times = 0 fby (1 fby (3 fby (6 fby 7)));
+        let wins = window(last: 2, of: data, time: times);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let wins = interpreter
+        .get_global("wins")
+        .and_then(|value| value.as_stream())
+        .expect("wins stream");
+    assert_stream_eq(
+        &wins,
+        &[
+            ScalarValue::List(vec![ScalarValue::Int(1)]),
+            ScalarValue::List(vec![ScalarValue::Int(1), ScalarValue::Int(2)]),
+            ScalarValue::List(vec![ScalarValue::Int(2), ScalarValue::Int(3)]),
+            ScalarValue::List(vec![ScalarValue::Int(4)]),
+            ScalarValue::List(vec![ScalarValue::Int(4), ScalarValue::Int(5)]),
+        ],
+    );
+}
+
+#[test]
+fn fold_window_can_reproduce_sum() {
+    let source = r#"
+        fn sum_step(total, sample) {
+            total + sample
+        }
+
+        let data = 1 fby (2 fby (3 fby 4));
+        let wins = window(last: 3, of: data);
+        let totals = foldWindow(wins, 0, sum_step);
+        let builtin_totals = sum(wins);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let totals = interpreter
+        .get_global("totals")
+        .and_then(|value| value.as_stream())
+        .expect("totals stream");
+    let builtin_totals = interpreter
+        .get_global("builtin_totals")
+        .and_then(|value| value.as_stream())
+        .expect("builtin stream");
+
+    let expected = &[
+        ScalarValue::Int(1),
+        ScalarValue::Int(3),
+        ScalarValue::Int(6),
+        ScalarValue::Int(9),
+        ScalarValue::Int(11),
+    ];
+    assert_stream_eq(&totals, expected);
+    assert_eq!(
+        stream_samples(&totals, expected.len()),
+        stream_samples(&builtin_totals, expected.len())
+    );
+}
+
+#[test]
+fn fold_window_with_finalizer_skips_undefined_samples() {
+    let source = r#"
+        fn avg_step(state, sample) {
+            let total = state.total;
+            let count = state.count;
+            let valid = defined(sample);
+            let next_total = if valid { total + sample } else { total };
+            let next_count = if valid { count + 1 } else { count };
+            { total: next_total, count: next_count }
+        }
+
+        fn avg_out(state) {
+            let valid = state.count > 0;
+            (state.total / state.count) when valid
+        }
+
+        let gap = 0 / 0;
+        let data = gap fby (1.0 fby (gap fby (3.0 fby gap)));
+        let wins = window(last: 2, of: data);
+        let averages = foldWindow(window: wins, init: { total: 0.0, count: 0 }, step: avg_step, out: avg_out);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let averages = interpreter
+        .get_global("averages")
+        .and_then(|value| value.as_stream())
+        .expect("averages stream");
+
+    assert_stream_eq(
+        &averages,
+        &[
+            ScalarValue::Undefined,
+            ScalarValue::Float(1.0),
+            ScalarValue::Float(1.0),
+            ScalarValue::Float(3.0),
+            ScalarValue::Float(3.0),
+            ScalarValue::Undefined,
+        ],
+    );
+}

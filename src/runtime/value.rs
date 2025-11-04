@@ -5,6 +5,7 @@ use crate::ast::{Expr, ValueDecl};
 use crate::diagnostics::Diagnostic;
 
 use super::env::Environment;
+use super::evaluator::Interpreter;
 use super::stream::Stream;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,7 +85,7 @@ pub struct CallArg {
 #[derive(Clone)]
 pub struct BuiltinFunction {
     pub name: &'static str,
-    pub handler: Rc<dyn Fn(&[CallArg]) -> Result<RuntimeValue, Diagnostic>>, // expects already-evaluated args
+    pub handler: Rc<dyn Fn(&Interpreter, &[CallArg]) -> Result<RuntimeValue, Diagnostic>>, // expects already-evaluated args
     pub min_arity: usize,
     pub max_arity: Option<usize>,
 }
@@ -97,7 +98,7 @@ impl BuiltinFunction {
         handler: F,
     ) -> Self
     where
-        F: Fn(&[CallArg]) -> Result<RuntimeValue, Diagnostic> + 'static,
+        F: Fn(&Interpreter, &[CallArg]) -> Result<RuntimeValue, Diagnostic> + 'static,
     {
         Self {
             name,

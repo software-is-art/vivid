@@ -24,3 +24,11 @@
 - Added `noGaps` monitor builtin and regression ensuring sparse streams trigger policy drops.
 - Enabled labeled monitor arguments (`by:`, `within:`, `per:`) and updated interpreter semantics/tests to keep guard code terse.
 - Implemented count-based `window(last: N, of: stream)` builtin with sliding list output and coverage in interpreter tests.
+
+## 2025-11-03
+- Added window aggregation builtins (`sum`, `avg`, `countDistinct`) backed by interpreter stateful folds, plus integration tests validating sums, means, and distinct counts over sliding windows.
+- Documented window aggregators in `spec.md`, including sample pipelines showing `sum`/`avg` usage alongside existing distinct counts.
+- Implemented `foldWindow` builtin with interpreter-aware step/finalizer hooks, added coverage proving parity with `sum` and custom average folds, and expanded `spec.md` with guidance and samples.
+- Introduced `tickEvery` clock builtin to surface periodic pulses, wired runtime support and documentation, and added regression ensuring correct cadence.
+- Extended `window` builtin with time-based windows via `time:` streams, including runtime buffering, documentation updates, and integration tests for timestamp trimming semantics.
+- Documented the reversible sublanguage design (`rev {}` regions, reversible values, budgets, diagnostics) in `spec.md` so the roadmap captures the opt-in bidirectional story.

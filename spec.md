@@ -82,15 +82,25 @@ I include specific deliverables, suggested internal APIs, test plans, and refere
 
 **WP7 — Windows & aggregations**
 
-* `window(last: N, of x)` (count‑based) and `window(last: Δt, of x)` (time‑based). The interpreter exposes the count-based primitive today; it returns `S<List<Value>>`, i.e. each tick sees the trailing window as a list. Aggregators (`sum`, `avg`, `countDistinct`) consume that list stream in later milestones.
-* `map(countDistinct)`, `sum`, `avg`, custom folds via `foldWindow(init, step, out)`.
+* `window(last: N, of x)` (count‑based) and `window(last: Δt, of x, time: clock)` (time‑based). Count windows return the trailing `N` samples. Time windows accept a monotonically increasing `clock : S<Int>` stream (ticks or physical time) and include samples whose timestamp is within the last `Δt` units. Both variants return `S<List<Value>>`, i.e. each tick sees the trailing window as a list.
+* Aggregators over window lists:
+  * `sum(window_stream)` keeps integer accumulators in `i64` where possible, promotes to `f64` on overflow or mixed numeric types, and skips `⊥` samples. A window with no defined numeric elements yields `⊥`.
+  * `avg(window_stream)` divides the window sum by the count of defined numeric elements, returning `⊥` if the window is empty after filtering undefined samples or contains heterogeneous numeric types.
+  * `countDistinct(window_stream)` counts unique, defined elements using equality on concrete values; undefined entries are ignored.
+  All three aggregators return `⊥` if the window contains non-numeric (for `sum`/`avg`) or inconsistent element types. They treat heterogeneity as invalid rather than best-effort coercion.
+* `foldWindow(window, init, step[, out])` lets authors express custom reducers in Vivid:
+  * `window` is an `S<List<Value>>` stream (typically from `window(last: …)`).
+  * `init` seeds the accumulator each tick (constants become constant streams).
+  * `step(acc, sample)` runs for every element in the window list; both arguments arrive as constant streams at the current tick.
+  * `out(acc)` runs once after the fold; omit it to return the accumulator directly.
+  The fold yields `⊥` if any stage returns `⊥`, a non-stream result, or if `init` is `⊥`. This mirrors the new built-ins and keeps user-defined reducers honest about undefined/mixed data.
 * Semantics line up with CQL (streams + relations + windows). ([infolab.stanford.edu][4])
 
 **WP8 — Sources, sinks, and clocks**
 
 * `source name : S<T> from …` adapters (files, Kafka, HTTP, IMAP).
 * `sink name : S<T> to …` with idempotent delivery guarantees.
-* Standard clocks: `tickEvery(Δt) : S<Bool>`, `minuteTick`, `hourlyTick`, etc.
+* Standard clocks: `tickEvery(period) : S<Bool>` is live—returns `true` every `period` steps starting at tick `0` and rejects non-positive periods. Higher-level helpers like `minuteTick`, `hourlyTick`, etc., can layer on top once we wire real time.
 * Keep core pure: adapters run at the boundary.
 
 **WP9 — Tooling (REPL, tests, docs)**
@@ -157,7 +167,7 @@ Use **nanopasses** to keep each transformation tiny and testable; normalize to *
 
 * Streams, lambdas, let, tuples/records.
 * Temporal ops: `next`, `fby`, `when`, `upon`, `defined`, `first`, `rest`.
-* Primitive windows (`windowN`, `windowΔt`) and `scan`.
+* Primitive windows (`windowN`, `windowΔt`). (A reversible `scan` drops in alongside the reversible sublanguage.)
 * No `value` blocks (they’re desugared to `apply/guard/use/errors`).
 
 IR is explicitly **clocked**: every top‑level program compiles to a **step function** `(state, input_t) → (state', output_t)`, like Lustre’s generated code. ([homepage.cs.uiowa.edu][3])
@@ -216,7 +226,204 @@ IR is explicitly **clocked**: every top‑level program compiles to a **step fun
 
 ---
 
-## 3) Risks & decisions (and how the references inform them)
+## 3) Reversible sublanguage (opt-in)
+
+### 3.1 Model at a glance
+
+* **`rev { … }` regions:** inside, every operator must be information-preserving. Lossy operators are permitted only when they emit a complement (mask, rejects, deltas, tick streams, permutations, etc.) that lets the step be inverted.
+* **Reversible values:** value types can opt into a `reversible` form that derives bidirectional `get/put` behaviour and tracks complements per field.
+* **Effect checking:** the compiler tracks a `rev` effect plus a loss ledger. A `rev` block compiles only if the ledger closes to zero—every lossy step must be justified by a complement.
+* **Budgets:** developers bound complement retention with `within` / `max_memory` policies; the checker enforces them.
+* **Ergonomics:** compiler diagnostics explain why an operator is not reversible and offer fix-its; inspectors visualise complements.
+
+Reversibility is entirely opt-in. The default language stays pragmatic and lossy.
+
+### 3.2 Surface: reversible regions and values
+
+#### 3.2.1 Reversible regions
+
+```vivid
+rev {
+  let cleaned =
+    emails
+    |> map Email.normalize
+    |> when(it, looksValid)
+    |> unique(by: _.id)
+    |> scan(group: Sum, seed: 0, _.size)
+
+  emit cleaned
+}
+```
+
+* `rev { … }` ensures each operator either preserves information or emits complements automatically (masks, rejects, per-step deltas, tick streams, permutations).
+* Operators without a reversible interpretation fail the effect check with actionable diagnostics.
+
+#### 3.2.2 Reversible values (bidirectional views)
+
+```vivid
+value Email : String reversible {
+  normalize it = it.trim().toLowerAscii()
+  require looksLikeEmail(it)
+  policy  invalid = drop keep rejects
+
+  putback desired using { originalCase } =
+    restoreCase(desired, originalCase)
+}
+```
+
+* In `rev` regions, `Email.normalize` emits complements such as `originalCase`, masks, and rejects so edits can flow backwards.
+* The compiler derives `get/put` laws and checks they satisfy bidirectional invariants (`get ∘ put = id`, `put ∘ get ≈ id`).
+
+#### 3.2.3 Operator sugar
+
+Inside `rev`, the usual operators automatically capture complements:
+
+* `when(p)` ⇒ mask + rejects.
+* `unique(by:)` ⇒ mask + rejects.
+* `scan(group: G)` ⇒ per-step inverse elements (groups expose `combine`, `inverse`, `identity`).
+* `window(last: N | Δt, …)` ⇒ per-window contents (checker warns about memory).
+* `upon(x, tick)` ⇒ retains tick stream.
+* `next` / `fby` ⇒ require paired `uncons/cons` helpers so head/tail are preserved.
+
+Outside `rev`, the same operators behave exactly as they do today—fast and lossy.
+
+### 3.3 Reversible operator rules
+
+| Operator / Pattern        | Reversible?                | How it remains reversible inside `rev`                                                    |
+| ------------------------- | -------------------------- | ----------------------------------------------------------------------------------------- |
+| `map f`                   | Only if `f` is an iso      | Declare `iso` or supply `putback` + complements (e.g., `originalCase`).                  |
+| `when(x, g)`              | Lossy filter               | Emit mask + rejects.                                                                     |
+| `unique`                  | Lossy                      | Emit mask + rejects.                                                                     |
+| `next` / `fby`            | Lossy alone                | Pair with `uncons/cons` to keep head and tail streams.                                   |
+| `upon(x, tick)`           | Lossy                      | Retain tick stream (update mask).                                                        |
+| `scan(op, seed, x)`       | Lossy in general           | Require group operations and per-step inverses; otherwise rejected in `rev`.             |
+| `window(last: N | Δt)`    | Often lossy                | Retain per-window contents or sufficient summary; otherwise rejected.                    |
+| Aggregates `sum`/`product`| Group-based                | Reversible via `unscan` (requires inverse).                                              |
+| Aggregates `min/max/avg`  | Not group-based            | Demand full window contents or reject inside `rev`.                                      |
+| Approx ops (Bloom, etc.)  | Approx + lossy             | Only allowed with masks/rejects; otherwise rejected.                                     |
+| `join`                    | Depends on join            | Keep provenance (left/right indices, multiplicities).                                    |
+| `groupBy` / `sort`        | Reorder                    | Keep the stable permutation to invert order.                                             |
+
+### 3.4 Diagnostics
+
+Examples of messages emitted by the effect checker:
+
+```
+rev error: `when(it, looksValid)` discards 13.2% of items.
+→ Fix: use the reversible filter (mask + rejects). This is automatic in `rev`.
+→ Or move this op outside the `rev` block.
+```
+
+```
+rev error: `avg` is not invertible.
+→ Options:
+   1) Wrap it in a window that keeps full contents: window(last: N) { avg(it) }
+   2) Use `sum` + `count` with `unscan` (both invertible).
+   3) Move `avg` outside `rev`.
+```
+
+```
+rev budget exceeded: complements for `window(last: 7d)` would exceed 64MB (est. 88MB).
+→ Options: tighten window, raise `max_memory`, or mark this step `irrevocable`.
+```
+
+### 3.5 Budgets & policies
+
+Budgets attach at any scope:
+
+```vivid
+rev(policy: { complement.within = 7d, max_memory = 64MB }) {
+  ...
+}
+
+value Email : String reversible {
+  policy complement.within = 30d
+}
+```
+
+If the effect checker projects a budget violation, it produces guidance (shrink window, relax policy, or mark the step `irrevocable`).
+
+### 3.6 Editing backwards
+
+Complements allow edits to flow from views back to sources:
+
+```vivid
+rev {
+  let users =
+    raw
+    |> map Email.normalize
+    |> unique(by: _.id)
+
+  users[42].email := "AliCe@Example.org"
+  commit users
+}
+```
+
+The compiler uses derived `putback` functions and stored complements (e.g., `originalCase`, masks) to generate a deterministic update script.
+
+### 3.7 Effect sketch
+
+* Operators inside `rev` have shape `Op : A → (B × C)` with an inverse `Op⁻¹ : (B × C) → A`; `C` is the complement.
+* Complements compose: `(b, c) ← Op(a)` then `(d, e) ← Op₂(b)` gives complement `c ⊗ e`.
+* Outside `rev`, complements are erased entirely.
+
+### 3.8 Library support
+
+* Group instances (`Sum`, `Product`, `Xor`, user-defined) for reversible scans.
+* Permutation utilities for `sort` / `groupBy`.
+* Join provenance structures (which side, multiplicity) for reversible joins.
+* Mask algebra (`Mask`, `and`, `or`, `invert`, `replay`).
+
+### 3.9 Tooling
+
+* **Rev Inspector:** inspect complements (mask heatmaps, reject samples, window buffers) with size estimates.
+* **Time-travel slider:** replay `upon` / `scan` state across ticks.
+* **Property tests:** `@rev_law` auto-generates round-trip tests for reversible value types and pipelines.
+* **Explainers:** “Why isn’t this reversible?” surfaces minimal counterexamples.
+
+### 3.10 Examples
+
+**Auditable email cleaning**
+
+```vivid
+rev(policy: { complement.within = 14d }) {
+  emails
+  |> map Email.normalize
+  |> when(it, looksValid)
+  |> unique(by: _.hash)
+  |> emit
+}
+```
+
+The pipeline retains masks and rejects, enabling audit trails and backward edits.
+
+**Pragmatic analytics (lossy)**
+
+```vivid
+let activeUsers =
+  events
+  |> window(last: 7d)
+  |> groupBy(_.userId)
+  |> map { userId, w -> { userId, count: w.count() } }
+```
+
+Outside `rev`, nothing changes: lossy operators remain cheap.
+
+### 3.11 Implementation notes
+
+1. **Effect checker:** mark operators with `rev` capabilities (`loss[kind]`) and ensure complements close the ledger.
+2. **Lowering:** inside `rev`, operators return `(value, complement)`; complements stream alongside values.
+3. **Retention:** store complements in a pluggable store obeying `within` / `max_memory` policies.
+4. **Optimisations:** fuse masks, compress permutations, delta-encode window contents.
+5. **Erasure:** outside `rev`, strip complements to keep default pipelines lightweight.
+
+### 3.12 Bottom line
+
+Reversibility becomes a first-class sublanguage: opt into `rev { … }`, leverage reversible value types, let the checker enforce budgets, and enjoy bidirectional editing where you need it—without burdening the default, lossy stream algebra.
+
+---
+
+## 4) Risks & decisions (and how the references inform them)
 
 * **Undefinedness (`⊥`) & policy semantics:**
   We follow Lucid’s stream‑with‑⊥ model and make `when/upon/hold` the only ways to repair/propagate; first‑instant behavior mirrors Lustre’s `pre/->` rules to avoid surprises. ([worrydream.com][1])
@@ -231,7 +438,7 @@ IR is explicitly **clocked**: every top‑level program compiles to a **step fun
 
 ---
 
-## 4) Concrete examples (end‑to‑end)
+## 5) Concrete examples (end‑to‑end)
 
 **A. Email (drop invalid, unique over time)**
 
@@ -247,7 +454,7 @@ source inbox : S<String> from Imap("imap.example","INBOX")
 sink   alerts: S<String> to   Slack("#ops")
 
 emails = Email.use(inbox)
-alerts <- ("New signup: " + show(first(emails))) upon minuteTick()
+alerts <- ("New signup: " + show(first(emails))) upon tickEvery(60)
 ```
 
 **B. Money with “hold on invalid” policy**
@@ -260,22 +467,52 @@ value Money<CCY> : Decimal {
 }
 
 flows   : S<Decimal> = payments.netFlows()
-balance : S<Money<USD>> = scan((b, d) => b + d, 0.0, Money<USD>.use(flows))
+net_flows : S<Money<USD>> = Money<USD>.use(flows)
+balance : S<Money<USD>> = 0.0 fby (balance + net_flows)
 ```
 
 **C. Sliding window analytics**
 
 ```vivid
-uniques1h : S<Int> =
-  window(last: 1h, of: Email.use(inbox)).map(countDistinct)
+pulses : S<Bool> = tickEvery(1)
+seconds : S<Int> = 0 fby (if pulses { seconds + 1 } else { seconds })
+
+hourly_emails : S<List<Email>> =
+  window(last: 3600, of: Email.use(inbox), time: seconds)
+uniques1h : S<Int> = countDistinct(hourly_emails)
 spike     : S<Bool> = uniques1h.map(_ > 100)
+
+payload_sizes : S<Float> = inbox.map(it.sizeBytes().toFloat())
+hourly_payloads : S<List<Float>> = window(last: 3600, of: payload_sizes, time: seconds)
+total_bytes  : S<Float> = sum(hourly_payloads)
+mean_bytes   : S<Float> = avg(hourly_payloads)
+
+fn payload_stats_step(state, bytes) {
+  let valid = defined(bytes)
+  let total = if valid { state.total + bytes } else { state.total }
+  let count = if valid { state.count + 1 } else { state.count }
+  { total: total, count: count }
+}
+
+fn payload_stats_out(state) {
+  let ready = state.count > 0
+  (state.total / state.count) when ready
+}
+
+mean_bytes_via_fold : S<Float> =
+  foldWindow(window: hourly_payloads,
+             init: { total: 0.0, count: 0 },
+             step: payload_stats_step,
+             out: payload_stats_out)
 ```
+
+Aggregators yield `⊥` when a window is empty or contains mixed/undefined samples, so policies typically pair them with `hold` or `replace` to smooth transient gaps.
 
 (CQL‑style windows with stream semantics.) ([infolab.stanford.edu][4])
 
 ---
 
-## 5) References (most influential for this plan)
+## 6) References (most influential for this plan)
 
 * **Lucid core semantics & operators:** Wadge & Ashcroft, *Lucid, the Dataflow Programming Language*; plus UWaterloo TR clarifying `fby`, `upon`, `whenever`. ([worrydream.com][1])
 * **Demand‑driven (eductive) execution & Lucid systems:** Lucid overview + history (pLucid, GIPSY). ([Wikipedia][6])

@@ -24,8 +24,14 @@ impl Interpreter {
         interpreter
     }
 
+    fn fork(&self) -> Self {
+        Self {
+            globals: self.globals.clone(),
+        }
+    }
+
     fn install_builtins(&mut self) {
-        self.register_builtin(BuiltinFunction::new("next", 1, Some(1), |args| {
+        self.register_builtin(BuiltinFunction::new("next", 1, Some(1), |_, args| {
             ensure_no_labels("next", args)?;
             let stream = expect_stream(&args[0].value, "next")?;
             Ok(RuntimeValue::Stream(Stream::new(move |tick| {
@@ -33,14 +39,14 @@ impl Interpreter {
             })))
         }));
 
-        self.register_builtin(BuiltinFunction::new("first", 1, Some(1), |args| {
+        self.register_builtin(BuiltinFunction::new("first", 1, Some(1), |_, args| {
             ensure_no_labels("first", args)?;
             let stream = expect_stream(&args[0].value, "first")?;
             let first = stream.value_at(0);
             Ok(RuntimeValue::Stream(Stream::constant(first)))
         }));
 
-        self.register_builtin(BuiltinFunction::new("rest", 1, Some(1), |args| {
+        self.register_builtin(BuiltinFunction::new("rest", 1, Some(1), |_, args| {
             ensure_no_labels("rest", args)?;
             let stream = expect_stream(&args[0].value, "rest")?;
             Ok(RuntimeValue::Stream(Stream::new(move |tick| {
@@ -48,7 +54,7 @@ impl Interpreter {
             })))
         }));
 
-        self.register_builtin(BuiltinFunction::new("defined", 1, Some(1), |args| {
+        self.register_builtin(BuiltinFunction::new("defined", 1, Some(1), |_, args| {
             ensure_no_labels("defined", args)?;
             let stream = expect_stream(&args[0].value, "defined")?;
             Ok(RuntimeValue::Stream(Stream::new(move |tick| {
@@ -57,7 +63,7 @@ impl Interpreter {
             })))
         }));
 
-        self.register_builtin(BuiltinFunction::new("when", 2, Some(2), |args| {
+        self.register_builtin(BuiltinFunction::new("when", 2, Some(2), |_, args| {
             ensure_no_labels("when", args)?;
             let value_stream = expect_stream(&args[0].value, "when value")?;
             let guard_stream = expect_stream(&args[1].value, "when guard")?;
@@ -71,7 +77,7 @@ impl Interpreter {
             })))
         }));
 
-        self.register_builtin(BuiltinFunction::new("upon", 2, Some(2), |args| {
+        self.register_builtin(BuiltinFunction::new("upon", 2, Some(2), |_, args| {
             ensure_no_labels("upon", args)?;
             let value_stream = expect_stream(&args[0].value, "upon value")?;
             let guard_stream = expect_stream(&args[1].value, "upon guard")?;
@@ -81,13 +87,13 @@ impl Interpreter {
             )))
         }));
 
-        self.register_builtin(BuiltinFunction::new("hold", 1, Some(1), |args| {
+        self.register_builtin(BuiltinFunction::new("hold", 1, Some(1), |_, args| {
             ensure_no_labels("hold", args)?;
             let source_stream = expect_stream(&args[0].value, "hold source")?;
             Ok(RuntimeValue::Stream(make_hold_stream(source_stream)))
         }));
 
-        self.register_builtin(BuiltinFunction::new("unique", 1, Some(2), |args| {
+        self.register_builtin(BuiltinFunction::new("unique", 1, Some(2), |_, args| {
             let mut value_stream = None;
             let mut key_stream = None;
 
@@ -145,7 +151,7 @@ impl Interpreter {
             )))
         }));
 
-        self.register_builtin(BuiltinFunction::new("monotone", 1, Some(2), |args| {
+        self.register_builtin(BuiltinFunction::new("monotone", 1, Some(2), |_, args| {
             let mut source_stream = None;
             let mut direction = None;
 
@@ -203,7 +209,7 @@ impl Interpreter {
             )))
         }));
 
-        self.register_builtin(BuiltinFunction::new("stabilizes", 2, Some(2), |args| {
+        self.register_builtin(BuiltinFunction::new("stabilizes", 2, Some(2), |_, args| {
             let mut source_stream = None;
             let mut window_value = None;
 
@@ -266,7 +272,7 @@ impl Interpreter {
             )))
         }));
 
-        self.register_builtin(BuiltinFunction::new("rateLimit", 2, Some(2), |args| {
+        self.register_builtin(BuiltinFunction::new("rateLimit", 2, Some(2), |_, args| {
             let mut event_stream = None;
             let mut interval_value = None;
 
@@ -329,9 +335,10 @@ impl Interpreter {
             )))
         }));
 
-        self.register_builtin(BuiltinFunction::new("window", 2, Some(2), |args| {
+        self.register_builtin(BuiltinFunction::new("window", 2, Some(3), |_, args| {
             let mut value_stream = None;
             let mut size_value = None;
+            let mut time_stream = None;
 
             for arg in args {
                 match arg.label.as_deref() {
@@ -354,6 +361,15 @@ impl Interpreter {
                         let stream = expect_stream(&arg.value, "window size")?;
                         size_value = Some(stream.value_at(0));
                     }
+                    Some("time") | Some("clock") => {
+                        if time_stream.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate time argument to window",
+                            ));
+                        }
+                        time_stream = Some(expect_stream(&arg.value, "window time")?);
+                    }
                     Some(label) => {
                         return Err(Diagnostic::new(
                             DiagnosticKind::Eval,
@@ -366,10 +382,12 @@ impl Interpreter {
                             size_value = Some(stream.value_at(0));
                         } else if value_stream.is_none() {
                             value_stream = Some(expect_stream(&arg.value, "window value")?);
+                        } else if time_stream.is_none() {
+                            time_stream = Some(expect_stream(&arg.value, "window time")?);
                         } else {
                             return Err(Diagnostic::new(
                                 DiagnosticKind::Eval,
-                                "window expects exactly two arguments",
+                                "window expects at most three arguments",
                             ));
                         }
                     }
@@ -383,24 +401,163 @@ impl Interpreter {
                 Diagnostic::new(DiagnosticKind::Eval, "window requires a size argument")
             })?;
             let size = parse_window_size(&size_raw)?;
-            Ok(RuntimeValue::Stream(make_window_stream(value_stream, size)))
+            if let Some(time_stream) = time_stream {
+                Ok(RuntimeValue::Stream(make_time_window_stream(
+                    value_stream,
+                    time_stream,
+                    size,
+                )))
+            } else {
+                Ok(RuntimeValue::Stream(make_window_stream(value_stream, size)))
+            }
         }));
 
-        self.register_builtin(BuiltinFunction::new("guard_and", 2, Some(2), |args| {
+        self.register_builtin(BuiltinFunction::new("tickEvery", 1, Some(1), |_, args| {
+            ensure_no_labels("tickEvery", args)?;
+            let interval_stream = expect_stream(&args[0].value, "tickEvery interval")?;
+            let interval_value = interval_stream.value_at(0);
+            let interval = parse_tick_every_interval(&interval_value)?;
+            Ok(RuntimeValue::Stream(make_tick_every_stream(interval)))
+        }));
+
+        self.register_builtin(BuiltinFunction::new(
+            "foldWindow",
+            3,
+            Some(4),
+            |interpreter, args| {
+                let mut window_arg: Option<RuntimeValue> = None;
+                let mut init_arg: Option<RuntimeValue> = None;
+                let mut step_arg: Option<RuntimeValue> = None;
+                let mut out_arg: Option<RuntimeValue> = None;
+
+                for arg in args {
+                    match arg.label.as_deref() {
+                        Some("window") | Some("of") | Some("values") | Some("value") => {
+                            if window_arg.is_some() {
+                                return Err(Diagnostic::new(
+                                    DiagnosticKind::Eval,
+                                    "duplicate window argument to foldWindow",
+                                ));
+                            }
+                            window_arg = Some(arg.value.clone());
+                        }
+                        Some("init") | Some("seed") | Some("initial") => {
+                            if init_arg.is_some() {
+                                return Err(Diagnostic::new(
+                                    DiagnosticKind::Eval,
+                                    "duplicate init argument to foldWindow",
+                                ));
+                            }
+                            init_arg = Some(arg.value.clone());
+                        }
+                        Some("step") | Some("reducer") => {
+                            if step_arg.is_some() {
+                                return Err(Diagnostic::new(
+                                    DiagnosticKind::Eval,
+                                    "duplicate step argument to foldWindow",
+                                ));
+                            }
+                            step_arg = Some(arg.value.clone());
+                        }
+                        Some("out") | Some("result") | Some("final") => {
+                            if out_arg.is_some() {
+                                return Err(Diagnostic::new(
+                                    DiagnosticKind::Eval,
+                                    "duplicate out argument to foldWindow",
+                                ));
+                            }
+                            out_arg = Some(arg.value.clone());
+                        }
+                        Some(label) => {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                format!("unknown label '{}' for foldWindow", label),
+                            ));
+                        }
+                        None => {
+                            if window_arg.is_none() {
+                                window_arg = Some(arg.value.clone());
+                            } else if init_arg.is_none() {
+                                init_arg = Some(arg.value.clone());
+                            } else if step_arg.is_none() {
+                                step_arg = Some(arg.value.clone());
+                            } else if out_arg.is_none() {
+                                out_arg = Some(arg.value.clone());
+                            } else {
+                                return Err(Diagnostic::new(
+                                    DiagnosticKind::Eval,
+                                    "foldWindow accepts at most four arguments",
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                let window_value = window_arg.ok_or_else(|| {
+                    Diagnostic::new(
+                        DiagnosticKind::Eval,
+                        "foldWindow requires a window stream argument",
+                    )
+                })?;
+                let init_value = init_arg.ok_or_else(|| {
+                    Diagnostic::new(DiagnosticKind::Eval, "foldWindow requires an init argument")
+                })?;
+                let step_value = step_arg.ok_or_else(|| {
+                    Diagnostic::new(DiagnosticKind::Eval, "foldWindow requires a step callable")
+                })?;
+
+                let window_stream = expect_stream(&window_value, "foldWindow window")?;
+                let init_stream = expect_stream(&init_value, "foldWindow init")?;
+                let interpreter_ctx = Rc::new(interpreter.fork());
+
+                Ok(RuntimeValue::Stream(make_fold_window_stream(
+                    interpreter_ctx,
+                    window_stream,
+                    init_stream,
+                    step_value,
+                    out_arg,
+                )))
+            },
+        ));
+
+        self.register_builtin(BuiltinFunction::new("sum", 1, Some(1), |_, args| {
+            ensure_no_labels("sum", args)?;
+            let stream = expect_stream(&args[0].value, "sum values")?;
+            Ok(RuntimeValue::Stream(make_sum_stream(stream)))
+        }));
+
+        self.register_builtin(BuiltinFunction::new("avg", 1, Some(1), |_, args| {
+            ensure_no_labels("avg", args)?;
+            let stream = expect_stream(&args[0].value, "avg values")?;
+            Ok(RuntimeValue::Stream(make_avg_stream(stream)))
+        }));
+
+        self.register_builtin(BuiltinFunction::new(
+            "countDistinct",
+            1,
+            Some(1),
+            |_, args| {
+                ensure_no_labels("countDistinct", args)?;
+                let stream = expect_stream(&args[0].value, "countDistinct values")?;
+                Ok(RuntimeValue::Stream(make_count_distinct_stream(stream)))
+            },
+        ));
+
+        self.register_builtin(BuiltinFunction::new("guard_and", 2, Some(2), |_, args| {
             ensure_no_labels("guard_and", args)?;
             let left = expect_stream(&args[0].value, "guard_and left")?;
             let right = expect_stream(&args[1].value, "guard_and right")?;
             Ok(RuntimeValue::Stream(make_guard_and(left, right)))
         }));
 
-        self.register_builtin(BuiltinFunction::new("guard_or", 2, Some(2), |args| {
+        self.register_builtin(BuiltinFunction::new("guard_or", 2, Some(2), |_, args| {
             ensure_no_labels("guard_or", args)?;
             let left = expect_stream(&args[0].value, "guard_or left")?;
             let right = expect_stream(&args[1].value, "guard_or right")?;
             Ok(RuntimeValue::Stream(make_guard_or(left, right)))
         }));
 
-        self.register_builtin(BuiltinFunction::new("noGaps", 1, Some(1), |args| {
+        self.register_builtin(BuiltinFunction::new("noGaps", 1, Some(1), |_, args| {
             ensure_no_labels("noGaps", args)?;
             let stream = expect_stream(&args[0].value, "noGaps value")?;
             Ok(RuntimeValue::Stream(make_no_gaps_guard(stream)))
@@ -410,6 +567,29 @@ impl Interpreter {
     fn register_builtin(&mut self, builtin: BuiltinFunction) {
         self.globals
             .insert(builtin.name.to_string(), RuntimeValue::Builtin(builtin));
+    }
+
+    fn call_callable_value(
+        &self,
+        callee: RuntimeValue,
+        args: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, Diagnostic> {
+        let call_args = args
+            .into_iter()
+            .map(|value| CallArg { label: None, value })
+            .collect::<Vec<_>>();
+        self.apply_callable(callee, call_args)
+            .map_err(first_diagnostic)
+    }
+
+    fn call_callable_stream(
+        &self,
+        callee: RuntimeValue,
+        args: Vec<RuntimeValue>,
+        context: &str,
+    ) -> Result<Stream, Diagnostic> {
+        let value = self.call_callable_value(callee, args)?;
+        expect_stream(&value, context)
     }
 
     pub fn get_global(&self, name: &str) -> Option<RuntimeValue> {
@@ -951,7 +1131,7 @@ impl Interpreter {
                     ),
                 )]);
             }
-            (builtin.handler)(&args).map_err(|diag| vec![diag])
+            (builtin.handler)(self, &args).map_err(|diag| vec![diag])
         } else if let Some(method) = callee.as_value_type_method() {
             self.invoke_value_type_method(method, args)
         } else {
@@ -1132,6 +1312,15 @@ impl Interpreter {
             },
         }
     }
+}
+
+fn first_diagnostic(diags: Vec<Diagnostic>) -> Diagnostic {
+    diags.into_iter().next().unwrap_or_else(|| {
+        Diagnostic::new(
+            DiagnosticKind::Eval,
+            "callable produced no diagnostics but did not return",
+        )
+    })
 }
 
 fn expect_stream(value: &RuntimeValue, context: &str) -> Result<Stream, Diagnostic> {
@@ -1507,6 +1696,23 @@ fn parse_rate_limit_interval(value: &ScalarValue) -> Result<usize, Diagnostic> {
     }
 }
 
+fn parse_tick_every_interval(value: &ScalarValue) -> Result<usize, Diagnostic> {
+    match value.as_int() {
+        Some(n) if n > 0 => Ok(n as usize),
+        Some(_) => Err(Diagnostic::new(
+            DiagnosticKind::Eval,
+            "tickEvery interval must be a positive integer",
+        )),
+        None => Err(Diagnostic::new(
+            DiagnosticKind::Eval,
+            format!(
+                "tickEvery interval expects integer length, found {}",
+                value.to_string_lossy()
+            ),
+        )),
+    }
+}
+
 fn make_rate_limit_guard(event_stream: Stream, interval: usize) -> Stream {
     use std::cell::RefCell;
 
@@ -1554,6 +1760,10 @@ fn make_guard_or(left: Stream, right: Stream) -> Stream {
 
 fn make_no_gaps_guard(stream: Stream) -> Stream {
     Stream::new(move |tick| ScalarValue::Bool(stream.value_at(tick).is_defined()))
+}
+
+fn make_tick_every_stream(interval: usize) -> Stream {
+    Stream::new(move |tick| ScalarValue::Bool(tick % interval == 0))
 }
 
 fn ensure_no_labels(name: &str, args: &[CallArg]) -> Result<(), Diagnostic> {
@@ -1608,4 +1818,221 @@ fn make_window_stream(value_stream: Stream, size: usize) -> Stream {
         let snapshot = buffer.borrow().iter().cloned().collect::<Vec<_>>();
         ScalarValue::List(snapshot)
     })
+}
+
+fn make_time_window_stream(value_stream: Stream, time_stream: Stream, duration: usize) -> Stream {
+    use std::cell::RefCell;
+
+    let buffer = RefCell::new(VecDeque::<(ScalarValue, i64)>::new());
+    Stream::new(move |tick| {
+        let time_value = time_stream.value_at(tick);
+        let timestamp = match time_value.as_int() {
+            Some(ts) => ts,
+            None => return ScalarValue::Undefined,
+        };
+        let value = value_stream.value_at(tick);
+
+        {
+            let duration_i64 = if duration > i64::MAX as usize {
+                i64::MAX
+            } else {
+                duration as i64
+            };
+            let mut deque = buffer.borrow_mut();
+            deque.push_back((value.clone(), timestamp));
+            let threshold = timestamp.saturating_sub(duration_i64);
+            while let Some((_, ts)) = deque.front() {
+                if *ts < threshold {
+                    deque.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let snapshot = buffer
+            .borrow()
+            .iter()
+            .map(|(item, _)| item.clone())
+            .collect::<Vec<_>>();
+        ScalarValue::List(snapshot)
+    })
+}
+
+fn make_fold_window_stream(
+    interpreter: Rc<Interpreter>,
+    window_stream: Stream,
+    init_stream: Stream,
+    step_callable: RuntimeValue,
+    out_callable: Option<RuntimeValue>,
+) -> Stream {
+    Stream::new(move |tick| {
+        let window_value = window_stream.value_at(tick);
+        let items = match window_value {
+            ScalarValue::List(items) => items,
+            _ => return ScalarValue::Undefined,
+        };
+
+        let mut accumulator = init_stream.value_at(tick);
+        if !accumulator.is_defined() {
+            return ScalarValue::Undefined;
+        }
+
+        for item in items {
+            let args = vec![
+                RuntimeValue::Scalar(accumulator.clone()),
+                RuntimeValue::Scalar(item.clone()),
+            ];
+            let step_stream = match interpreter.call_callable_stream(
+                step_callable.clone(),
+                args,
+                "foldWindow step",
+            ) {
+                Ok(stream) => stream,
+                Err(_) => return ScalarValue::Undefined,
+            };
+            accumulator = step_stream.value_at(tick);
+            if !accumulator.is_defined() {
+                return ScalarValue::Undefined;
+            }
+        }
+
+        if let Some(out_callable) = &out_callable {
+            let args = vec![RuntimeValue::Scalar(accumulator.clone())];
+            match interpreter.call_callable_stream(out_callable.clone(), args, "foldWindow out") {
+                Ok(stream) => stream.value_at(tick),
+                Err(_) => ScalarValue::Undefined,
+            }
+        } else {
+            accumulator
+        }
+    })
+}
+
+fn make_sum_stream(source: Stream) -> Stream {
+    Stream::new(move |tick| match source.value_at(tick) {
+        ScalarValue::List(items) => aggregate_sum(&items).unwrap_or(ScalarValue::Undefined),
+        _ => ScalarValue::Undefined,
+    })
+}
+
+fn make_avg_stream(source: Stream) -> Stream {
+    Stream::new(move |tick| match source.value_at(tick) {
+        ScalarValue::List(items) => aggregate_avg(&items).unwrap_or(ScalarValue::Undefined),
+        _ => ScalarValue::Undefined,
+    })
+}
+
+fn make_count_distinct_stream(source: Stream) -> Stream {
+    Stream::new(move |tick| match source.value_at(tick) {
+        ScalarValue::List(items) => {
+            aggregate_count_distinct(&items).unwrap_or(ScalarValue::Undefined)
+        }
+        _ => ScalarValue::Undefined,
+    })
+}
+
+fn aggregate_sum(items: &[ScalarValue]) -> Option<ScalarValue> {
+    if items.is_empty() {
+        return Some(ScalarValue::Int(0));
+    }
+
+    let mut use_float = false;
+    let mut total_float = 0.0;
+    let mut total_int: i128 = 0;
+
+    for item in items {
+        match item {
+            ScalarValue::Int(value) => {
+                if use_float {
+                    total_float += *value as f64;
+                } else {
+                    total_int += *value as i128;
+                    if total_int > i64::MAX as i128 || total_int < i64::MIN as i128 {
+                        use_float = true;
+                        total_float = total_int as f64;
+                    }
+                }
+            }
+            ScalarValue::Float(value) => {
+                if !use_float {
+                    use_float = true;
+                    total_float = total_int as f64;
+                }
+                total_float += *value;
+            }
+            ScalarValue::Undefined => return None,
+            _ => return None,
+        }
+    }
+
+    if use_float {
+        Some(ScalarValue::Float(total_float))
+    } else {
+        Some(ScalarValue::Int(total_int as i64))
+    }
+}
+
+fn aggregate_avg(items: &[ScalarValue]) -> Option<ScalarValue> {
+    if items.is_empty() {
+        return None;
+    }
+
+    let mut count: usize = 0;
+    let mut use_float = false;
+    let mut total_float = 0.0;
+    let mut total_int: i128 = 0;
+
+    for item in items {
+        match item {
+            ScalarValue::Int(value) => {
+                count += 1;
+                if use_float {
+                    total_float += *value as f64;
+                } else {
+                    total_int += *value as i128;
+                    if total_int > i64::MAX as i128 || total_int < i64::MIN as i128 {
+                        use_float = true;
+                        total_float = total_int as f64;
+                    }
+                }
+            }
+            ScalarValue::Float(value) => {
+                count += 1;
+                if !use_float {
+                    use_float = true;
+                    total_float = total_int as f64;
+                }
+                total_float += *value;
+            }
+            ScalarValue::Undefined => return None,
+            _ => return None,
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+
+    let sum = if use_float {
+        total_float
+    } else {
+        total_int as f64
+    };
+    Some(ScalarValue::Float(sum / count as f64))
+}
+
+fn aggregate_count_distinct(items: &[ScalarValue]) -> Option<ScalarValue> {
+    let mut uniques: Vec<ScalarValue> = Vec::new();
+    for item in items {
+        match item {
+            ScalarValue::Undefined => return None,
+            _ => {
+                if !uniques.iter().any(|existing| existing == item) {
+                    uniques.push(item.clone());
+                }
+            }
+        }
+    }
+    Some(ScalarValue::Int(uniques.len() as i64))
 }
