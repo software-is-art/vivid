@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, DiagnosticKind};
+use crate::types::TypeChecker;
 
 use super::env::Environment;
 use super::stream::Stream;
@@ -617,6 +618,10 @@ impl Interpreter {
     }
 
     pub fn evaluate_module(&mut self, module: &Module) -> Result<(), Vec<Diagnostic>> {
+        let mut type_checker = TypeChecker::new();
+        if let Err(diags) = type_checker.infer_module(module) {
+            return Err(diags);
+        }
         let mut diagnostics = Vec::new();
         for item in &module.items {
             if let Err(mut diag) = self.evaluate_item(item) {

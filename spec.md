@@ -41,6 +41,7 @@ I include specific deliverables, suggested internal APIs, test plans, and refere
 **WP3 — Type system**
 
 * Simple HM‑style type inference with `S<T>` as a **first‑class** type.
+  * Current implementation wires a first-pass checker that enforces numeric/logical operator compatibility, validates function bodies against their declared stream types, and ensures value blocks gate on `Bool` streams before interpretation; richer inference (polymorphism, value-type contracts) remains to be layered on.
 * Nominal `value` types with representation type `Rep` and an **erased** runtime tag (compile‑time only).
 * Type rules:
 

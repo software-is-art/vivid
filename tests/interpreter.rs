@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use vivid::DiagnosticKind;
 use vivid::parser::parse_module;
 use vivid::runtime::Interpreter;
 use vivid::runtime::stream::Stream;
@@ -46,6 +47,67 @@ fn fby_combines_streams() {
             ScalarValue::Int(2),
             ScalarValue::Int(2),
         ],
+    );
+}
+
+#[test]
+fn type_checker_rejects_mismatched_streams() {
+    let source = r#"
+        let bad = 1 + true;
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    let result = interpreter.evaluate_module(&module);
+    assert!(result.is_err());
+    let diagnostics = result.err().unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diag| diag.kind == DiagnosticKind::Type),
+        "expected a type error, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn type_checker_rejects_invalid_function_body() {
+    let source = r#"
+        fn bad(x) {
+            x + true
+        }
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    let result = interpreter.evaluate_module(&module);
+    assert!(result.is_err());
+    let diagnostics = result.err().unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diag| diag.kind == DiagnosticKind::Type),
+        "expected type error, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn type_checker_rejects_invalid_value_require() {
+    let source = r#"
+        value Bad : Int {
+            require it
+        }
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    let result = interpreter.evaluate_module(&module);
+    assert!(result.is_err());
+    let diagnostics = result.err().unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diag| diag.kind == DiagnosticKind::Type),
+        "expected type error, got: {:?}",
+        diagnostics
     );
 }
 
@@ -966,7 +1028,7 @@ fn fold_window_with_finalizer_skips_undefined_samples() {
             (state.total / state.count) when valid
         }
 
-        let gap = 0 / 0;
+        let gap = 0.0 / 0.0;
         let data = gap fby (1.0 fby (gap fby (3.0 fby gap)));
         let wins = window(last: 2, of: data);
         let averages = foldWindow(window: wins, init: { total: 0.0, count: 0 }, step: avg_step, out: avg_out);
