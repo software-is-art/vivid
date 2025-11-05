@@ -43,3 +43,4 @@
 - Extended the REPL with `:first`, `:at`, and `:rest` stepping commands to make spec-driven stream inspection possible while richer tooling comes online.
 - Started the type system rollout: added a module-level checker that rejects mismatched stream operations (numeric/logical guards, `fby`, etc.) before interpretation, and updated tests to cover the first type error case.
 - Extended the checker to cover function bodies and value blocks, ensuring parameters, `normalize`, `require/always`, and policy expressions respect their expected stream types; added regression coverage for the new diagnostics.
+- Added a project README that documents goals, workflow commands, and the parse-don't-validate development philosophy.
