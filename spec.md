@@ -72,6 +72,7 @@ I include specific deliverables, suggested internal APIs, test plans, and refere
   * `rateLimit(x, per Δt)` (requires a time stream),
   * `noGaps(x) ≡ □ defined(x)`.
   * All monitors accept labeled arguments for readability: e.g. `unique(value: x, by: key)`, `monotone(it, direction: ">=")`, `stabilizes(value: it, within: 3)`, `rateLimit(events: flag, per: 5)`. Positional calls remain valid, but labels are preferred in examples.
+  * `unique` additionally accepts `within:` to bound duplicate memory; `unique(samples, within: 3)` only rejects repeats that occur within the last three ticks (inclusive of the current one).
 * Compose guards (`and`, `or`, `by key`). Output a boolean stream for `policy`.
   *Grounding:* online RV for LTL/TLTL (three‑valued semantics, causality, finite memory where possible). ([isp.uni-luebeck.de][7])
 
@@ -99,13 +100,16 @@ I include specific deliverables, suggested internal APIs, test plans, and refere
 **WP8 — Sources, sinks, and clocks**
 
 * `source name : S<T> from …` adapters (files, Kafka, HTTP, IMAP).
+  * In the interpreter, `from …` is evaluated eagerly and bound as a stream so downstream declarations can treat the source name like any other stream.
 * `sink name : S<T> to …` with idempotent delivery guarantees.
+  * Interpreter baseline records the `to …` stream so tests and tooling can inspect what would be emitted, paving the way for real adapters later.
 * Standard clocks: `tickEvery(period) : S<Bool>` is live—returns `true` every `period` steps starting at tick `0` and rejects non-positive periods. Higher-level helpers like `minuteTick`, `hourlyTick`, etc., can layer on top once we wire real time.
 * Keep core pure: adapters run at the boundary.
 
 **WP9 — Tooling (REPL, tests, docs)**
 
 * REPL with stepping (`at t`, `first`, `rest`), stream visualization.
+  * Current REPL supports interactive entry of declarations/expressions plus `:show`, `:first`, `:at`, and `:rest` helpers for quick inspection; deeper stepping (`rest` chains, diagnostics) will continue to grow.
 * Test DSL: `test { let s=streamOf(...); assert … }`.
 * “Why undefined?” diagnostics: annotate `⊥` with origin chain.
 

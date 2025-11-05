@@ -32,3 +32,12 @@
 - Introduced `tickEvery` clock builtin to surface periodic pulses, wired runtime support and documentation, and added regression ensuring correct cadence.
 - Extended `window` builtin with time-based windows via `time:` streams, including runtime buffering, documentation updates, and integration tests for timestamp trimming semantics.
 - Documented the reversible sublanguage design (`rev {}` regions, reversible values, budgets, diagnostics) in `spec.md` so the roadmap captures the opt-in bidirectional story.
+
+## 2025-11-04
+- Extended the `unique` monitor with an optional `within:` window bound, ensuring duplicate tracking can be capped without sacrificing correctness.
+- Added interpreter regressions covering both unkeyed and keyed `unique` monitors with window bounds to confirm the new semantics.
+- Updated `spec.md` to call out the new `unique(..., within: N)` syntax for memory-bounded duplicate detection.
+- Evaluated `source` declarations during interpretation so their providers bind to usable streams, plus regression ensuring downstream expressions can consume them.
+- Implemented sink evaluation, capturing `to` streams inside the interpreter and adding coverage so we can assert on emitted values before wiring real adapters.
+- Replaced the placeholder binary with an interactive REPL (prompt, expression evaluation, `:show` previews) so the interpreter can be exercised iteratively while we build out diagnostics and stepping features.
+- Extended the REPL with `:first`, `:at`, and `:rest` stepping commands to make spec-driven stream inspection possible while richer tooling comes online.

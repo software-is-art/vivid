@@ -17,6 +17,7 @@
 - Keep modules and helpers logically grouped (`runtime/` for stream mechanics, `parser.rs` for syntax); name new utilities with `make_*` or `*_stream` for symmetry.
 - Let `rustfmt` lead formatting, but prune noise: comments should be terse, purposeful, and anchored to `spec.md` concepts.
 - Tests and identifiers stay lowercase snake_case; reserve CamelCase for nominal types defined in the AST.
+- Apply “parse, don’t validate” rigor: parsing/desugaring should produce well-typed, constraint-respecting structures so downstream stages can drop defensive checks. Where lifecycle or invariants matter, encode them as Rust typestates (distinct structs/enums) instead of boolean flags or runtime assertions. When you encounter legacy code that violates this, bias toward refactoring it into stronger types/typestates rather than piling on additional runtime validation.
 
 ## Testing Guidelines
 - Use the existing integration harness in `tests/interpreter.rs` to exercise stream semantics and policies.

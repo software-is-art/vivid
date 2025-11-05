@@ -13,20 +13,23 @@ use super::value::{
 
 pub struct Interpreter {
     globals: HashMap<String, RuntimeValue>,
+    sinks: HashMap<String, Stream>,
 }
 
 impl Interpreter {
     pub fn new() -> Self {
         let mut interpreter = Self {
             globals: HashMap::new(),
+            sinks: HashMap::new(),
         };
         interpreter.install_builtins();
         interpreter
     }
 
-    fn fork(&self) -> Self {
+    pub fn fork(&self) -> Self {
         Self {
             globals: self.globals.clone(),
+            sinks: self.sinks.clone(),
         }
     }
 
@@ -93,9 +96,10 @@ impl Interpreter {
             Ok(RuntimeValue::Stream(make_hold_stream(source_stream)))
         }));
 
-        self.register_builtin(BuiltinFunction::new("unique", 1, Some(2), |_, args| {
+        self.register_builtin(BuiltinFunction::new("unique", 1, Some(3), |_, args| {
             let mut value_stream = None;
             let mut key_stream = None;
+            let mut window = None;
 
             for arg in args.iter() {
                 match arg.label.as_deref() {
@@ -117,6 +121,17 @@ impl Interpreter {
                         }
                         key_stream = Some(expect_stream(&arg.value, "unique key")?);
                     }
+                    Some("within") | Some("window") => {
+                        if window.is_some() {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                "duplicate window argument to unique",
+                            ));
+                        }
+                        let stream = expect_stream(&arg.value, "unique within")?;
+                        let raw = stream.value_at(0);
+                        window = Some(parse_unique_window(&raw)?);
+                    }
                     Some(label) => {
                         return Err(Diagnostic::new(
                             DiagnosticKind::Eval,
@@ -131,7 +146,7 @@ impl Interpreter {
                         } else {
                             return Err(Diagnostic::new(
                                 DiagnosticKind::Eval,
-                                "unique accepts at most two arguments",
+                                "unique accepts at most two positional arguments; use 'within:' to bound history",
                             ));
                         }
                     }
@@ -148,6 +163,7 @@ impl Interpreter {
             Ok(RuntimeValue::Stream(make_unique_guard(
                 value_stream,
                 key_stream,
+                window,
             )))
         }));
 
@@ -596,6 +612,10 @@ impl Interpreter {
         self.globals.get(name).cloned()
     }
 
+    pub fn get_sink(&self, name: &str) -> Option<Stream> {
+        self.sinks.get(name).cloned()
+    }
+
     pub fn evaluate_module(&mut self, module: &Module) -> Result<(), Vec<Diagnostic>> {
         let mut diagnostics = Vec::new();
         for item in &module.items {
@@ -661,7 +681,50 @@ impl Interpreter {
                 );
                 Ok(())
             }
-            Item::Struct(_) | Item::Source(_) | Item::Sink(_) => Ok(()),
+            Item::Struct(_) => Ok(()),
+            Item::Source(source_decl) => {
+                let env = Environment::from_map(self.globals.clone());
+                let provider =
+                    self.evaluate_expr(&source_decl.provider, &env)
+                        .map_err(|mut diags| {
+                            diags.push(
+                                Diagnostic::new(
+                                    DiagnosticKind::Eval,
+                                    format!(
+                                        "failed to evaluate provider for source '{}'",
+                                        source_decl.name.name
+                                    ),
+                                )
+                                .with_span(source_decl.span),
+                            );
+                            diags
+                        })?;
+                let stream = expect_stream_vec(&provider, "source provider")?;
+                self.globals
+                    .insert(source_decl.name.name.clone(), RuntimeValue::Stream(stream));
+                Ok(())
+            }
+            Item::Sink(sink_decl) => {
+                let env = Environment::from_map(self.globals.clone());
+                let target = self
+                    .evaluate_expr(&sink_decl.target, &env)
+                    .map_err(|mut diags| {
+                        diags.push(
+                            Diagnostic::new(
+                                DiagnosticKind::Eval,
+                                format!(
+                                    "failed to evaluate target for sink '{}'",
+                                    sink_decl.name.name
+                                ),
+                            )
+                            .with_span(sink_decl.span),
+                        );
+                        diags
+                    })?;
+                let stream = expect_stream_vec(&target, "sink target")?;
+                self.sinks.insert(sink_decl.name.name.clone(), stream);
+                Ok(())
+            }
         }
     }
 
@@ -1525,7 +1588,18 @@ fn make_hold_stream(source_stream: Stream) -> Stream {
     })
 }
 
-fn make_unique_guard(value_stream: Stream, key_stream: Option<Stream>) -> Stream {
+fn make_unique_guard(
+    value_stream: Stream,
+    key_stream: Option<Stream>,
+    window: Option<usize>,
+) -> Stream {
+    match window {
+        Some(span) => make_unique_guard_bounded(value_stream, key_stream, span),
+        None => make_unique_guard_unbounded(value_stream, key_stream),
+    }
+}
+
+fn make_unique_guard_unbounded(value_stream: Stream, key_stream: Option<Stream>) -> Stream {
     use std::cell::RefCell;
 
     match key_stream {
@@ -1569,6 +1643,89 @@ fn make_unique_guard(value_stream: Stream, key_stream: Option<Stream>) -> Stream
                 }
             })
         }
+    }
+}
+
+fn make_unique_guard_bounded(
+    value_stream: Stream,
+    key_stream: Option<Stream>,
+    window: usize,
+) -> Stream {
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct State {
+        entries: VecDeque<(usize, String)>,
+        counts: HashMap<String, usize>,
+    }
+
+    let state = RefCell::new(State::default());
+    Stream::new(move |tick| {
+        let value = value_stream.value_at(tick);
+        if !value.is_defined() {
+            return ScalarValue::Bool(true);
+        }
+
+        let token = if let Some(keys) = &key_stream {
+            let key_value = keys.value_at(tick);
+            if !key_value.is_defined() {
+                return ScalarValue::Bool(true);
+            }
+            format!(
+                "{}::{}",
+                key_value.to_string_lossy(),
+                value.to_string_lossy()
+            )
+        } else {
+            value.to_string_lossy()
+        };
+
+        let mut state = state.borrow_mut();
+        while state
+            .entries
+            .front()
+            .map(|(entry_tick, _)| entry_tick.saturating_add(window) <= tick)
+            .unwrap_or(false)
+        {
+            if let Some((_, entry_token)) = state.entries.pop_front() {
+                if let Some(count) = state.counts.get_mut(&entry_token) {
+                    if *count <= 1 {
+                        state.counts.remove(&entry_token);
+                    } else {
+                        *count -= 1;
+                    }
+                }
+            }
+        }
+
+        if state.counts.get(&token).copied().unwrap_or(0) > 0 {
+            ScalarValue::Bool(false)
+        } else {
+            state.entries.push_back((tick, token.clone()));
+            state
+                .counts
+                .entry(token)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            ScalarValue::Bool(true)
+        }
+    })
+}
+
+fn parse_unique_window(value: &ScalarValue) -> Result<usize, Diagnostic> {
+    match value.as_int() {
+        Some(n) if n >= 0 => Ok(n as usize),
+        Some(_) => Err(Diagnostic::new(
+            DiagnosticKind::Eval,
+            "unique within expects a non-negative integer window",
+        )),
+        None => Err(Diagnostic::new(
+            DiagnosticKind::Eval,
+            format!(
+                "unique within expects integer window length, found {}",
+                value.to_string_lossy()
+            ),
+        )),
     }
 }
 

@@ -326,6 +326,102 @@ fn unique_guard_flags_duplicate_samples() {
 }
 
 #[test]
+fn unique_guard_within_window_limits_history() {
+    let source = r#"
+        value Limited : String {
+            always unique(it, within: 2)
+            policy invalid = drop
+        }
+
+        let input = "dup" fby ("dup" fby ("fresh" fby "dup"));
+        let guard = Limited.guard(input);
+        let repaired = Limited.use(input);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let guard = interpreter
+        .get_global("guard")
+        .and_then(|value| value.as_stream())
+        .expect("guard stream");
+    assert_stream_eq(
+        &guard,
+        &[
+            ScalarValue::Bool(true),
+            ScalarValue::Bool(false),
+            ScalarValue::Bool(true),
+            ScalarValue::Bool(true),
+        ],
+    );
+
+    let repaired = interpreter
+        .get_global("repaired")
+        .and_then(|value| value.as_stream())
+        .expect("repaired stream");
+    assert_stream_eq(
+        &repaired,
+        &[
+            ScalarValue::String("dup".to_string()),
+            ScalarValue::Undefined,
+            ScalarValue::String("fresh".to_string()),
+            ScalarValue::String("dup".to_string()),
+        ],
+    );
+}
+
+#[test]
+fn unique_guard_within_window_respects_keys() {
+    let source = r#"
+        struct Event { user: String, score: Int }
+
+        value LimitedScores : Event {
+            always unique(it.score, by: it.user, within: 2)
+            policy invalid = drop
+        }
+
+        let rec0 = { user: "alice", score: 1 };
+        let rec1 = { user: "alice", score: 1 };
+        let rec2 = { user: "alice", score: 1 };
+        let rec3 = { user: "bob", score: 2 };
+        let input = rec0 fby (rec1 fby (rec2 fby rec3));
+        let guard = LimitedScores.guard(input);
+        let repaired = LimitedScores.use(input);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let guard = interpreter
+        .get_global("guard")
+        .and_then(|value| value.as_stream())
+        .expect("guard stream");
+    assert_stream_eq(
+        &guard,
+        &[
+            ScalarValue::Bool(true),
+            ScalarValue::Bool(false),
+            ScalarValue::Bool(true),
+            ScalarValue::Bool(true),
+        ],
+    );
+
+    let repaired = interpreter
+        .get_global("repaired")
+        .and_then(|value| value.as_stream())
+        .expect("repaired stream");
+    assert_stream_eq(
+        &repaired,
+        &[
+            user_record("alice", 1),
+            ScalarValue::Undefined,
+            user_record("alice", 1),
+            user_record("bob", 2),
+        ],
+    );
+}
+
+#[test]
 fn monotone_guard_detects_trend_violations() {
     let source = r#"
         value Rising : Int {
@@ -589,6 +685,67 @@ fn no_gaps_guard_requires_defined_samples() {
             ScalarValue::Int(1),
             ScalarValue::Undefined,
             ScalarValue::Undefined,
+        ],
+    );
+}
+
+#[test]
+fn source_declaration_exposes_stream() {
+    let source = r#"
+        source numbers : S<Int> from (1 fby 2);
+
+        let doubled = numbers + numbers;
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let numbers = interpreter
+        .get_global("numbers")
+        .and_then(|value| value.as_stream())
+        .expect("numbers stream");
+    assert_stream_eq(
+        &numbers,
+        &[
+            ScalarValue::Int(1),
+            ScalarValue::Int(2),
+            ScalarValue::Int(2),
+        ],
+    );
+
+    let doubled = interpreter
+        .get_global("doubled")
+        .and_then(|value| value.as_stream())
+        .expect("doubled stream");
+    assert_stream_eq(
+        &doubled,
+        &[
+            ScalarValue::Int(2),
+            ScalarValue::Int(4),
+            ScalarValue::Int(4),
+        ],
+    );
+}
+
+#[test]
+fn sink_declaration_captures_stream() {
+    let source = r#"
+        let base = 1 fby 2;
+        sink outbox : S<Int> to (base + base);
+    "#;
+    let module = parse_module(source).expect("parse");
+    let mut interpreter = Interpreter::new();
+    interpreter.evaluate_module(&module).expect("evaluate");
+
+    let sink = interpreter
+        .get_sink("outbox")
+        .expect("sink stream available");
+    assert_stream_eq(
+        &sink,
+        &[
+            ScalarValue::Int(2),
+            ScalarValue::Int(4),
+            ScalarValue::Int(4),
         ],
     );
 }
