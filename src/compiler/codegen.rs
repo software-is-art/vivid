@@ -44,6 +44,16 @@ fn emit_unique_helpers(out: &mut String, module: &CoreModule) {
     writeln!(out, "").unwrap();
     writeln!(
         out,
+        "static inline void unique_buffer_init(UniqueBuffer* buf) {{"
+    )
+    .unwrap();
+    writeln!(out, "    buf->values = NULL;").unwrap();
+    writeln!(out, "    buf->len = 0;").unwrap();
+    writeln!(out, "    buf->cap = 0;").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out, "").unwrap();
+    writeln!(
+        out,
         "static inline void unique_buffer_reset(UniqueBuffer* buf) {{"
     )
     .unwrap();
@@ -86,6 +96,17 @@ fn emit_unique_helpers(out: &mut String, module: &CoreModule) {
     writeln!(out, "    }}").unwrap();
     writeln!(out, "    buf->values[buf->len++] = value;").unwrap();
     writeln!(out, "    return 1.0;").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out, "").unwrap();
+    writeln!(
+        out,
+        "static inline void unique_key_buffer_init(UniqueKeyBuffer* buf) {{"
+    )
+    .unwrap();
+    writeln!(out, "    buf->keys = NULL;").unwrap();
+    writeln!(out, "    buf->values = NULL;").unwrap();
+    writeln!(out, "    buf->len = 0;").unwrap();
+    writeln!(out, "    buf->cap = 0;").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out, "").unwrap();
     writeln!(
@@ -208,9 +229,9 @@ fn emit_state_helpers(out: &mut String, module: &CoreModule) {
     }
     for spec in &module.unique_specs {
         if spec.keyed {
-            writeln!(out, "    unique_key_buffer_reset(&state->{});", spec.name).unwrap();
+            writeln!(out, "    unique_key_buffer_init(&state->{});", spec.name).unwrap();
         } else {
-            writeln!(out, "    unique_buffer_reset(&state->{});", spec.name).unwrap();
+            writeln!(out, "    unique_buffer_init(&state->{});", spec.name).unwrap();
         }
     }
     writeln!(out, "}}\n").unwrap();
