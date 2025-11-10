@@ -44,3 +44,25 @@
 - Started the type system rollout: added a module-level checker that rejects mismatched stream operations (numeric/logical guards, `fby`, etc.) before interpretation, and updated tests to cover the first type error case.
 - Extended the checker to cover function bodies and value blocks, ensuring parameters, `normalize`, `require/always`, and policy expressions respect their expected stream types; added regression coverage for the new diagnostics.
 - Added a project README that documents goals, workflow commands, and the parse-don't-validate development philosophy.
+
+## 2025-11-09
+- Added compiler runtime helpers (`Outputs`, `step`, `init_runtime`, `run_ticks`) so generated C exposes a deterministic stepper host callers can drive per spec §2.2.
+- Consolidated the day’s learning into `notes/spec-sync-2025-11-09-summary.md`, replacing the stack of reminder notes.
+- Remaining work: build the higher-level runner/CLI from §2.4 (to manage inputs/outputs) and then begin the reversible effect checker (Section 3).
+- Re-read the archive + `spec.md` (`notes/spec-sync-2025-11-25b.md`), finished the §2.4 runner by emitting CSV headers, honoring `--ticks/--start/--quiet/--log`, and added compiler tests so `cargo test` now covers the new CLI surface.
+- Landed `notes/spec-sync-2025-11-25c.md`, then added an end-to-end compiler test that writes the generated C to disk, builds it with `cc`, runs `--quiet --ticks --start --log`, and diffs the CSV rows against interpreter samples per spec §2.4’s conformance checklist.
+- Fixed `run_ticks` to warm the runtime state whenever `--start` is non-zero so compiled binaries now produce the same streams as the interpreter even when skipping initial ticks.
+- Logged `notes/spec-sync-2025-11-25d.md`, refactored the compiler conformance harness into a reusable helper, and added guard/boolean coverage (`compiled_runner_respects_guards_and_bools`) so the generated CLI is validated beyond simple arithmetic streams (undefined samples coerce to `0` to match the C backend’s `when` semantics).
+- Added `notes/spec-sync-2025-11-25e.md` to capture the latest spec reread; future work is to port window/monitor programs into the compiled-runner harness so §2.4’s “run all tests through both backends” goal is steadily approached before resuming the reversible checker.
+- Captured `notes/spec-sync-2025-11-25f.md`/`25g.md`, expanded the `compile_and_compare` helper to tolerate extra CSV columns, and documented that windows/sum remain unimplemented in the compiler; added a regression (`compiler_rejects_window_and_sum_for_now`) so we surface the precise diagnostics until the lowering work lands.
+- Logged `notes/spec-sync-2025-11-25h.md` after lowering `sum(window(last: N, ...))` into a new `WindowSum` core form; state extraction now synthesizes the sliding history slots so compiled binaries can stream the same sliding sums as the interpreter (`compiled_runner_handles_window_sum`).
+- Logged `notes/spec-sync-2025-11-25i.md`, implemented `monotone(...)` lowering + state extraction (previous-value + seen flag), and added `compiled_runner_handles_monotone_guard` so the compiled CLI now demonstrates monitor coverage per spec §2.4.
+- Logged `notes/spec-sync-2025-11-25j.md`, wired `guard_and`/`guard_or` lowering straight to boolean core ops, and added the end-to-end `compiled_runner_handles_guard_and` so composed monitor traces now match across interpreter + compiled runner; next up is keyed `unique(by:)`.
+- Logged `notes/spec-sync-2025-11-25k.md`, added keyed `unique(value, by:, within:)` lowering/state extraction (value/key/TTL ring buffer) plus interpreter + compiler coverage, keeping the host runner aligned with spec §2.4 monitor semantics.
+- Logged `notes/spec-sync-2025-11-25l.md`, allowing `guard_and/guard_or` to accept arbitrary fan-in and adding a compiled-runner regression so composed monitors continue matching interpreter traces.
+- Logged `notes/spec-sync-2025-11-25m.md`, added interpreter/compiler tests for three-way `guard_or`, and confirmed the new multi-operand lowering keeps the compiled runner aligned with spec §2.4’s guard composition.
+
+## 2025-11-26
+- Extended the compiler lowering/state extraction path so `unique(...)` without a `within:` bound lowers to a dedicated unbounded guard form instead of requiring fake windows.
+- Added C codegen support for the new guard by emitting heap-backed `UniqueBuffer`/`UniqueKeyBuffer` helpers and wiring interpreter parity tests for keyed/unkeyed cases.
+- Kicked off the compiler regression suite, but `cargo test --test compiler` currently hangs while the generated C harness is being built/run; need to bisect whether repeated `cc` invocations or tempdir IO is causing the stall before landing.
