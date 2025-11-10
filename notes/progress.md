@@ -65,4 +65,4 @@
 ## 2025-11-26
 - Extended the compiler lowering/state extraction path so `unique(...)` without a `within:` bound lowers to a dedicated unbounded guard form instead of requiring fake windows.
 - Added C codegen support for the new guard by emitting heap-backed `UniqueBuffer`/`UniqueKeyBuffer` helpers and wiring interpreter parity tests for keyed/unkeyed cases.
-- Kicked off the compiler regression suite, but `cargo test --test compiler` currently hangs while the generated C harness is being built/run; need to bisect whether repeated `cc` invocations or tempdir IO is causing the stall before landing.
+- Discovered the compiler test hang was caused by calling `unique_*_reset` on uninitialised buffers (junk pointers freed on startup); added explicit init helpers, reran `devbox run -- cargo test`, and confirmed the full suite now passes.
